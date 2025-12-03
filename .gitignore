@@ -1,8 +1,7 @@
 # Environment variables
 .env
-QUICKSTART.md
-DEPLOYMENT.md
-
+New_Tech_project/QUICKSTART.md
+New_Tech_project/DEPLOYMENT.md
 
 # Python
 __pycache__/
