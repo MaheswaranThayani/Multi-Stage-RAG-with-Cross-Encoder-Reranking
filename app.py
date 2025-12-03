@@ -10,14 +10,11 @@ from PyPDF2 import PdfReader
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
-    from langchain_openai import OpenAIEmbeddings, ChatOpenAI
     USE_MODERN_LANGCHAIN = True
 except ImportError:
     # Fallback to older version
     from langchain.text_splitter import RecursiveCharacterTextSplitter  # pyright: ignore[reportMissingImports]
     from langchain.vectorstores import FAISS  # pyright: ignore[reportMissingImports]
-    from langchain.embeddings import OpenAIEmbeddings
-    from langchain.llms import OpenAI as ChatOpenAI  # pyright: ignore[reportMissingImports]
     USE_MODERN_LANGCHAIN = False
 
 # Try to import RetrievalQA without raising module-level errors on Streamlit Cloud
@@ -58,9 +55,6 @@ class HuggingFaceLLM:
 # Load environment variables
 load_dotenv()
 
-# Global configuration
-openai_api_key = os.getenv("OPENAI_API_KEY")
-
 # Page configuration
 st.set_page_config(
     page_title="PDF Q&A Bot",
@@ -99,25 +93,9 @@ st.markdown("""
 st.markdown('<p class="main-header">📄 PDF Question Answering Bot</p>', unsafe_allow_html=True)
 st.markdown("---")
 
-# Sidebar for configuration
+# Sidebar for information
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    
-    # Choose embedding model
-    # Default to checked only if an API key is available
-    use_openai = st.checkbox(
-        "Use OpenAI (Requires API Key)",
-        value=bool(openai_api_key)
-    )
-    
-    if use_openai:
-        if not openai_api_key:
-            st.warning("⚠️ OpenAI API key not found in .env file")
-            st.info("Please add OPENAI_API_KEY to your .env file")
-            use_openai = False
-        else:
-            st.success("✅ OpenAI API key loaded")
-    
+    st.header("ℹ️ About this app")
     st.markdown("---")
     st.markdown("### 📚 About")
     st.info("""
@@ -126,7 +104,7 @@ with st.sidebar:
     - Ask questions about the content
     - Get accurate answers with source references
     
-    Built with LangChain, Streamlit, FAISS, and OpenAI/HuggingFace.
+    Built with LangChain, Streamlit, FAISS, and HuggingFace.
     """)
 
 # Main content area
@@ -170,40 +148,34 @@ with col1:
                         )
                         chunks = splitter.split_text(text)
                         
-                        # Create embeddings and vector store
-                        if use_openai and openai_api_key:
-                            # Set API key in environment for newer versions
-                            os.environ["OPENAI_API_KEY"] = openai_api_key
-                            embeddings = OpenAIEmbeddings()
-                            llm = ChatOpenAI(temperature=0.2, model="gpt-3.5-turbo")
-                        else:
-                            st.info("🔄 Using HuggingFace embeddings + LLM (OpenAI-free mode)")
-                            # Lazy import to avoid loading if not needed
-                            try:
-                                from langchain_community.embeddings import HuggingFaceEmbeddings
-                            except ImportError:
-                                from langchain.embeddings import HuggingFaceEmbeddings
-                            embeddings = HuggingFaceEmbeddings(
-                                model_name="sentence-transformers/all-MiniLM-L6-v2"
+                        # Create embeddings and vector store (HuggingFace only)
+                        st.info("🔄 Using HuggingFace embeddings + LLM")
+                        # Lazy import to avoid loading if not needed
+                        try:
+                            from langchain_community.embeddings import HuggingFaceEmbeddings
+                        except ImportError:
+                            from langchain.embeddings import HuggingFaceEmbeddings
+                        embeddings = HuggingFaceEmbeddings(
+                            model_name="sentence-transformers/all-MiniLM-L6-v2"
+                        )
+                        
+                        # Configure HuggingFace LLM (requires HUGGINGFACEHUB_API_TOKEN)
+                        hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+                        if not hf_token:
+                            st.error(
+                                "⚠️ HUGGINGFACEHUB_API_TOKEN is not set. "
+                                "Please add it to your .env file to use the HuggingFace LLM."
                             )
-                            
-                            # Configure HuggingFaceHub LLM (requires HUGGINGFACEHUB_API_TOKEN)
-                            hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-                            if not hf_token:
-                                st.error(
-                                    "⚠️ HUGGINGFACEHUB_API_TOKEN is not set. "
-                                    "Please add it to your .env file to use the HuggingFace LLM."
-                                )
-                                st.stop()
-                            
-                            # You can change `repo_id` to any chat/instruct model available to you
-                            llm = HuggingFaceLLM(
-                                repo_id="mistralai/Mistral-7B-Instruct-v0.2",
-                                token=hf_token,
-                                temperature=0.2,
-                                max_new_tokens=512,
-                                top_p=0.95,
-                            )
+                            st.stop()
+                        
+                        # You can change `repo_id` to any chat/instruct model available to you
+                        llm = HuggingFaceLLM(
+                            repo_id="mistralai/Mistral-7B-Instruct-v0.2",
+                            token=hf_token,
+                            temperature=0.2,
+                            max_new_tokens=512,
+                            top_p=0.95,
+                        )
                         
                         vector_store = FAISS.from_texts(chunks, embedding=embeddings)
                         
