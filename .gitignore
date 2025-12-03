@@ -4,7 +4,7 @@
 
 # Ignore these documentation files from the repo (treated like secrets)
 DEPLOYMENT.md
-QUICKSTART.md
+
 
 # Python
 __pycache__/
