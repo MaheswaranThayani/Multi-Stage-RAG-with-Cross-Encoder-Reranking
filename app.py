@@ -1,24 +1,65 @@
 import streamlit as st
-try:
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_community.vectorstores import FAISS
-    from langchain_openai import OpenAIEmbeddings, OpenAI
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    from langchain.chains import RetrievalQA
-except ImportError:
-    # Fallback for older LangChain versions
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain.vectorstores import FAISS
-    from langchain.embeddings import OpenAIEmbeddings, HuggingFaceEmbeddings
-    from langchain.llms import OpenAI
-    from langchain.chains import RetrievalQA
-from PyPDF2 import PdfReader
 import os
 from dotenv import load_dotenv
 import tempfile
+import importlib.util
+from typing import Any, Dict
+from PyPDF2 import PdfReader
+
+# Core imports (always needed)
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_community.vectorstores import FAISS
+    from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+    USE_MODERN_LANGCHAIN = True
+except ImportError:
+    # Fallback to older version
+    from langchain.text_splitter import RecursiveCharacterTextSplitter  # pyright: ignore[reportMissingImports]
+    from langchain.vectorstores import FAISS  # pyright: ignore[reportMissingImports]
+    from langchain.embeddings import OpenAIEmbeddings
+    from langchain.llms import OpenAI as ChatOpenAI  # pyright: ignore[reportMissingImports]
+    USE_MODERN_LANGCHAIN = False
+
+# Try to import RetrievalQA without raising module-level errors on Streamlit Cloud
+lc_chains_spec = importlib.util.find_spec("langchain.chains")
+if lc_chains_spec:
+    try:
+        from langchain.chains import RetrievalQA  # pyright: ignore[reportMissingImports]
+        HAS_RETRIEVALQA = True
+    except ImportError:
+        HAS_RETRIEVALQA = False
+else:
+    HAS_RETRIEVALQA = False
+
+# Lightweight wrapper for HuggingFace text-generation inference
+class HuggingFaceLLM:
+    def __init__(
+        self,
+        repo_id: str,
+        *,
+        token: str,
+        temperature: float = 0.2,
+        max_new_tokens: int = 512,
+        top_p: float = 0.95,
+    ) -> None:
+        from huggingface_hub import InferenceClient
+
+        self.client = InferenceClient(model=repo_id, token=token)
+        self.params: Dict[str, Any] = {
+            "temperature": temperature,
+            "max_new_tokens": max_new_tokens,
+            "top_p": top_p,
+        }
+
+    def invoke(self, prompt: str) -> str:
+        return self.client.text_generation(prompt, **self.params)
+
 
 # Load environment variables
 load_dotenv()
+
+# Global configuration
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
 # Page configuration
 st.set_page_config(
@@ -63,10 +104,13 @@ with st.sidebar:
     st.header("⚙️ Configuration")
     
     # Choose embedding model
-    use_openai = st.checkbox("Use OpenAI (Requires API Key)", value=True)
+    # Default to checked only if an API key is available
+    use_openai = st.checkbox(
+        "Use OpenAI (Requires API Key)",
+        value=bool(openai_api_key)
+    )
     
     if use_openai:
-        openai_api_key = os.getenv("OPENAI_API_KEY")
         if not openai_api_key:
             st.warning("⚠️ OpenAI API key not found in .env file")
             st.info("Please add OPENAI_API_KEY to your .env file")
@@ -131,30 +175,57 @@ with col1:
                             # Set API key in environment for newer versions
                             os.environ["OPENAI_API_KEY"] = openai_api_key
                             embeddings = OpenAIEmbeddings()
-                            llm = OpenAI(temperature=0.2)
+                            llm = ChatOpenAI(temperature=0.2, model="gpt-3.5-turbo")
                         else:
-                            st.info("🔄 Using HuggingFace embeddings (free alternative)")
+                            st.info("🔄 Using HuggingFace embeddings + LLM (OpenAI-free mode)")
+                            # Lazy import to avoid loading if not needed
+                            try:
+                                from langchain_community.embeddings import HuggingFaceEmbeddings
+                            except ImportError:
+                                from langchain.embeddings import HuggingFaceEmbeddings
                             embeddings = HuggingFaceEmbeddings(
                                 model_name="sentence-transformers/all-MiniLM-L6-v2"
                             )
-                            # For HuggingFace, you'll need to set up HuggingFaceHub for LLM
-                            # For now, we'll still use OpenAI for generation if available
-                            if openai_api_key:
-                                os.environ["OPENAI_API_KEY"] = openai_api_key
-                                llm = OpenAI(temperature=0.2)
-                            else:
-                                st.error("⚠️ Please set OPENAI_API_KEY in .env file for answer generation")
+                            
+                            # Configure HuggingFaceHub LLM (requires HUGGINGFACEHUB_API_TOKEN)
+                            hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+                            if not hf_token:
+                                st.error(
+                                    "⚠️ HUGGINGFACEHUB_API_TOKEN is not set. "
+                                    "Please add it to your .env file to use the HuggingFace LLM."
+                                )
                                 st.stop()
+                            
+                            # You can change `repo_id` to any chat/instruct model available to you
+                            llm = HuggingFaceLLM(
+                                repo_id="mistralai/Mistral-7B-Instruct-v0.2",
+                                token=hf_token,
+                                temperature=0.2,
+                                max_new_tokens=512,
+                                top_p=0.95,
+                            )
                         
                         vector_store = FAISS.from_texts(chunks, embedding=embeddings)
                         
-                        # Create QA chain
+                        # Create QA chain (only if an LLM is configured)
                         retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-                        qa_chain = RetrievalQA.from_chain_type(
-                            llm=llm,
-                            retriever=retriever,
-                            return_source_documents=True
-                        )
+                        
+                        if llm is not None:
+                            if HAS_RETRIEVALQA:
+                                # Use RetrievalQA if available
+                                qa_chain = RetrievalQA.from_chain_type(
+                                    llm=llm,
+                                    retriever=retriever,
+                                    return_source_documents=True
+                                )
+                            else:
+                                # Simple approach: store retriever and llm separately
+                                qa_chain = {
+                                    "retriever": retriever,
+                                    "llm": llm
+                                }
+                        else:
+                            qa_chain = None
                         
                         # Store in session state
                         st.session_state.vector_store = vector_store
@@ -182,6 +253,9 @@ with col2:
     st.subheader("💬 Ask Questions")
     
     if st.session_state.pdf_processed:
+        if st.session_state.qa_chain is None:
+            st.warning("PDF was processed using HuggingFace embeddings only. No LLM is configured for answering questions, so Q&A is disabled until you enable OpenAI or add another LLM.")
+            st.stop()
         # Clear chat button
         if st.button("🗑️ Clear Chat History"):
             st.session_state.messages = []
@@ -211,15 +285,48 @@ with col2:
             with st.chat_message("assistant"):
                 with st.spinner("🤔 Thinking..."):
                     try:
-                        result = st.session_state.qa_chain({"query": query})
-                        
-                        answer = result["result"]
-                        source_docs = result.get("source_documents", [])
+                        if HAS_RETRIEVALQA:
+                            # Use RetrievalQA chain
+                            result = st.session_state.qa_chain({"query": query})
+                            answer = result["result"]
+                            source_docs = result.get("source_documents", [])
+                            sources_text = [doc.page_content for doc in source_docs] if source_docs else []
+                        else:
+                            # Simple approach: retrieve and generate
+                            qa_data = st.session_state.qa_chain
+                            retriever = qa_data["retriever"]
+                            llm = qa_data["llm"]
+                            
+                            # Retrieve relevant documents (support modern retriever API)
+                            if hasattr(retriever, "get_relevant_documents"):
+                                docs = retriever.get_relevant_documents(query)
+                            elif hasattr(retriever, "invoke"):
+                                docs = retriever.invoke(query)
+                            else:
+                                raise AttributeError(
+                                    "Retriever object does not support document lookup."
+                                )
+                            
+                            # Create context from documents
+                            context = "\n\n".join([doc.page_content for doc in docs])
+                            
+                            # Generate answer using LLM
+                            prompt = f"""Answer the following question based only on the provided context. If the answer cannot be found in the context, say "I don't have enough information to answer this question."
+
+Context:
+{context}
+
+Question: {query}
+
+Answer:"""
+                            
+                            llm_response = llm.invoke(prompt)
+                            answer = llm_response.content if hasattr(llm_response, "content") else str(llm_response)
+                            sources_text = [doc.page_content for doc in docs] if docs else []
                         
                         st.markdown(answer)
                         
                         # Store assistant response
-                        sources_text = [doc.page_content for doc in source_docs]
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": answer,
@@ -227,16 +334,19 @@ with col2:
                         })
                         
                         # Display sources in expander
-                        if source_docs:
+                        if sources_text:
                             with st.expander("📌 View Source Documents"):
-                                for i, doc in enumerate(source_docs, 1):
+                                for i, source in enumerate(sources_text, 1):
                                     st.markdown(f"**Source {i}:**")
-                                    st.text(doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content)
+                                    source_str = source[:500] + "..." if len(source) > 500 else source
+                                    st.text(source_str)
                                     st.markdown("---")
                                     
                     except Exception as e:
                         error_msg = f"❌ Error generating answer: {str(e)}"
                         st.error(error_msg)
+                        import traceback
+                        st.code(traceback.format_exc())
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": error_msg

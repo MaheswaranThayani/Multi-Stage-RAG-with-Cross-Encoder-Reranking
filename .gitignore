@@ -1,5 +1,8 @@
 # Environment variables
 .env
+QUICKSTART.md
+DEPLOYMENT.md
+
 
 # Python
 __pycache__/

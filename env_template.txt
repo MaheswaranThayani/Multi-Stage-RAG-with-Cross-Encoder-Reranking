@@ -1,9 +1,0 @@
-# OpenAI API Configuration
-# Get your API key from: https://platform.openai.com/api-keys
-# Copy this file to .env and add your actual API key
-
-OPENAI_API_KEY=your_openai_api_key_here
-
-# Optional: HuggingFace Token (if using private models)
-# HUGGINGFACE_API_TOKEN=your_huggingface_token_here
-
