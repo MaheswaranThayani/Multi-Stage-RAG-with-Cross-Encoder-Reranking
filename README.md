@@ -2,8 +2,9 @@
 
 A Retrieval-Augmented Generation (RAG) based PDF Question Answering application built using Python, LangChain, Streamlit, FAISS, and **local HuggingFace models**. This application allows users to upload PDF documents and ask questions, with the system retrieving relevant chunks using embeddings and generating accurate answers **only from the uploaded PDF content**.
 
-## ✨ Features
+## Features
 
+<<<<<<< HEAD
 - 📤 **PDF Upload**: Easy drag-and-drop interface for uploading PDF documents
 - 🔍 **Intelligent Text Extraction**: Extracts text from PDF pages using PyPDF2
 - 🧠 **Smart Chunking**: Uses RecursiveCharacterTextSplitter for optimal text segmentation
@@ -13,8 +14,19 @@ A Retrieval-Augmented Generation (RAG) based PDF Question Answering application 
 - 📌 **Source Citations**: Shows source documents for each answer
 - 📜 **Chat History**: Maintains conversation history during the session
 - 🎨 **Modern UI**: Clean and intuitive Streamlit interface
+=======
+- **PDF Upload**: Easy drag-and-drop interface for uploading PDF documents
+- **Intelligent Text Extraction**: Extracts text from PDF pages using PyPDF2
+- **Smart Chunking**: Uses RecursiveCharacterTextSplitter for optimal text segmentation
+- **Vector Embeddings**: Supports both OpenAI and HuggingFace embeddings
+- **Vector Store**: FAISS for efficient similarity search
+- **Interactive Q&A**: Chat-like interface for asking questions
+- **Source Citations**: Shows source documents for each answer
+- **Chat History**: Maintains conversation history during the session
+- **Modern UI**: Clean and intuitive Streamlit interface
+>>>>>>> b872fe17bad3d3e09d451186a7a37fdff1e5a915
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 | Component | Technology |
 |-----------|-----------|
@@ -26,7 +38,7 @@ A Retrieval-Augmented Generation (RAG) based PDF Question Answering application 
 | Vector Store | FAISS |
 | Language Model | Local HuggingFace text2text model (`google/flan-t5-small` by default) |
 
-## 📋 Prerequisites
+##  Prerequisites
 
 - Python 3.9 or higher
 - pip package manager
@@ -86,7 +98,7 @@ streamlit run app.py
 
 ### Step 4: View Sources
 
-- Click on "📌 View Source Documents" to see the exact chunks from the PDF that were used to generate the answer
+- Click on "View Source Documents" to see the exact chunks from the PDF that were used to generate the answer
 - This helps verify the accuracy and transparency of the responses
 
 ## 📁 Project Structure
@@ -102,8 +114,9 @@ New_Tech_project/
 └── .env                  # Environment variables (not in git)
 ```
 
-## 🔧 Configuration Options
+## Configuration Options
 
+<<<<<<< HEAD
 The app currently runs **entirely with local HuggingFace models**:
 
 - Embeddings: `sentence-transformers/all-MiniLM-L6-v2`
@@ -112,6 +125,13 @@ The app currently runs **entirely with local HuggingFace models**:
 If you want to switch to a different local model, change the model name passed to `load_local_hf_pipeline` in `app.py`.
 
 ## 🧠 How It Works
+=======
+### Using HuggingFace
+1. The app uses HuggingFace's `sentence-transformers/all-MiniLM-L6-v2` for embeddings
+2. modify the code to use HuggingFace Hub models
+
+## How It Works
+>>>>>>> b872fe17bad3d3e09d451186a7a37fdff1e5a915
 
 1. **PDF Upload**: User uploads a PDF document through Streamlit interface
 2. **Text Extraction**: PyPDF2 extracts text from all pages of the PDF
