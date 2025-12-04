@@ -2,19 +2,19 @@
 
 A Retrieval-Augmented Generation (RAG) based PDF Question Answering application built using Python, LangChain, Streamlit, FAISS, and OpenAI/HuggingFace. This application allows users to upload PDF documents and ask questions, with the system retrieving relevant chunks using embeddings and generating accurate answers using Large Language Models (LLMs).
 
-## ✨ Features
+## Features
 
-- 📤 **PDF Upload**: Easy drag-and-drop interface for uploading PDF documents
-- 🔍 **Intelligent Text Extraction**: Extracts text from PDF pages using PyPDF2
-- 🧠 **Smart Chunking**: Uses RecursiveCharacterTextSplitter for optimal text segmentation
-- 🔢 **Vector Embeddings**: Supports both OpenAI and HuggingFace embeddings
-- 💾 **Vector Store**: FAISS for efficient similarity search
-- 💬 **Interactive Q&A**: Chat-like interface for asking questions
-- 📌 **Source Citations**: Shows source documents for each answer
-- 📜 **Chat History**: Maintains conversation history during the session
-- 🎨 **Modern UI**: Clean and intuitive Streamlit interface
+- **PDF Upload**: Easy drag-and-drop interface for uploading PDF documents
+- **Intelligent Text Extraction**: Extracts text from PDF pages using PyPDF2
+- **Smart Chunking**: Uses RecursiveCharacterTextSplitter for optimal text segmentation
+- **Vector Embeddings**: Supports both OpenAI and HuggingFace embeddings
+- **Vector Store**: FAISS for efficient similarity search
+- **Interactive Q&A**: Chat-like interface for asking questions
+- **Source Citations**: Shows source documents for each answer
+- **Chat History**: Maintains conversation history during the session
+- **Modern UI**: Clean and intuitive Streamlit interface
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 | Component | Technology |
 |-----------|-----------|
@@ -26,7 +26,7 @@ A Retrieval-Augmented Generation (RAG) based PDF Question Answering application 
 | Vector Store | FAISS |
 | Language Model | OpenAI GPT (with HuggingFace fallback option) |
 
-## 📋 Prerequisites
+##  Prerequisites
 
 - Python 3.8 or higher
 - OpenAI API key (optional - can use HuggingFace for embeddings)
@@ -96,7 +96,7 @@ streamlit run app.py
 
 ### Step 4: View Sources
 
-- Click on "📌 View Source Documents" to see the exact chunks from the PDF that were used to generate the answer
+- Click on "View Source Documents" to see the exact chunks from the PDF that were used to generate the answer
 - This helps verify the accuracy and transparency of the responses
 
 ## 📁 Project Structure
@@ -112,19 +112,13 @@ New_Tech_project/
 └── .env                  # Environment variables (not in git)
 ```
 
-## 🔧 Configuration Options
+## Configuration Options
 
-### Using OpenAI (Default)
+### Using HuggingFace
+1. The app uses HuggingFace's `sentence-transformers/all-MiniLM-L6-v2` for embeddings
+2. modify the code to use HuggingFace Hub models
 
-The application uses OpenAI embeddings and GPT models by default. Ensure you have set `OPENAI_API_KEY` in your `.env` file.
-
-### Using HuggingFace (Free Alternative)
-
-1. Uncheck "Use OpenAI" in the sidebar
-2. The app will use HuggingFace's `sentence-transformers/all-MiniLM-L6-v2` for embeddings
-3. Note: You'll still need OpenAI API key for answer generation, or you can modify the code to use HuggingFace Hub models
-
-## 🧠 How It Works
+## How It Works
 
 1. **PDF Upload**: User uploads a PDF document through Streamlit interface
 2. **Text Extraction**: PyPDF2 extracts text from all pages of the PDF
