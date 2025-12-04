@@ -49,7 +49,20 @@ class HuggingFaceLLM:
         }
 
     def invoke(self, prompt: str) -> str:
-        return self.client.text_generation(prompt, **self.params)
+        # Use chat_completion for instruct/chat models (conversational task)
+        # Format: messages list with role and content
+        messages = [{"role": "user", "content": prompt}]
+        response = self.client.chat_completion(
+            messages=messages,
+            **self.params
+        )
+        # Extract text from response
+        if hasattr(response, "choices") and len(response.choices) > 0:
+            return response.choices[0].message.content
+        elif isinstance(response, dict) and "choices" in response:
+            return response["choices"][0]["message"]["content"]
+        else:
+            return str(response)
 
 
 # Load environment variables
