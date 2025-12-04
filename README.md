@@ -5,15 +5,15 @@ A Retrieval-Augmented Generation (RAG) based PDF Question Answering application 
 ## Features
 
 <<<<<<< HEAD
-- 📤 **PDF Upload**: Easy drag-and-drop interface for uploading PDF documents
-- 🔍 **Intelligent Text Extraction**: Extracts text from PDF pages using PyPDF2
-- 🧠 **Smart Chunking**: Uses RecursiveCharacterTextSplitter for optimal text segmentation
-- 🔢 **Vector Embeddings**: Uses HuggingFace sentence-transformer embeddings
-- 💾 **Vector Store**: FAISS for efficient similarity search
-- 💬 **Interactive Q&A**: Chat-like interface for asking questions
-- 📌 **Source Citations**: Shows source documents for each answer
-- 📜 **Chat History**: Maintains conversation history during the session
-- 🎨 **Modern UI**: Clean and intuitive Streamlit interface
+- **PDF Upload**: Easy drag-and-drop interface for uploading PDF documents
+- **Intelligent Text Extraction**: Extracts text from PDF pages using PyPDF2
+- **Smart Chunking**: Uses RecursiveCharacterTextSplitter for optimal text segmentation
+- **Vector Embeddings**: Uses HuggingFace sentence-transformer embeddings
+- **Vector Store**: FAISS for efficient similarity search
+- **Interactive Q&A**: Chat-like interface for asking questions
+- **Source Citations**: Shows source documents for each answer
+- **Chat History**: Maintains conversation history during the session
+- **Modern UI**: Clean and intuitive Streamlit interface
 =======
 - **PDF Upload**: Easy drag-and-drop interface for uploading PDF documents
 - **Intelligent Text Extraction**: Extracts text from PDF pages using PyPDF2
@@ -24,7 +24,7 @@ A Retrieval-Augmented Generation (RAG) based PDF Question Answering application 
 - **Source Citations**: Shows source documents for each answer
 - **Chat History**: Maintains conversation history during the session
 - **Modern UI**: Clean and intuitive Streamlit interface
->>>>>>> b872fe17bad3d3e09d451186a7a37fdff1e5a915
+
 
 ## Technology Stack
 
@@ -44,39 +44,16 @@ A Retrieval-Augmented Generation (RAG) based PDF Question Answering application 
 - pip package manager
 - A machine that can download and run a small HuggingFace model (the first run will download `google/flan-t5-small`)
 
-## 🚀 Installation
 
-### Step 1: Clone the Repository
 
-```bash
-git clone <your-repo-url>
-cd New_Tech_project
 ```
 
-### Step 2: Create Virtual Environment (Recommended)
 
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# macOS/Linux
-python3 -m venv venv
-source venv/bin/activate
 ```
 
-### Step 3: Install Dependencies
 
-```bash
-pip install -r requirements.txt
-```
 
-### Step 4: (Optional) Environment Variables
-
-For the current local-only HuggingFace setup **no API keys are required**.
-You can still use a `.env` file for future extensions, but it is not needed to run this version.
-
-## 🎯 Usage
+## Usage
 
 ### Step 1: Run the Application
 
@@ -124,7 +101,7 @@ The app currently runs **entirely with local HuggingFace models**:
 
 If you want to switch to a different local model, change the model name passed to `load_local_hf_pipeline` in `app.py`.
 
-## 🧠 How It Works
+##  How It Works
 =======
 ### Using HuggingFace
 1. The app uses HuggingFace's `sentence-transformers/all-MiniLM-L6-v2` for embeddings
@@ -143,7 +120,7 @@ If you want to switch to a different local model, change the model name passed t
 8. **Answer Generation**: A local HuggingFace pipeline receives the top chunks as context and generates an answer using **only that context**
 9. **Response Display**: Answer and source documents are displayed to the user
 
-## 📊 Features Breakdown
+## Features Breakdown
 
 | Feature | Description |
 |---------|-------------|
@@ -154,7 +131,7 @@ If you want to switch to a different local model, change the model name passed t
 | **Chat Interface** | Conversational UI with message history |
 | **Error Handling** | Graceful error handling with user-friendly messages |
 
-## 🎨 UI Features
+##  UI Features
 
 - **Two-Column Layout**: Upload area and chat area side by side
 - **Status Indicators**: Visual feedback for PDF processing status
@@ -162,26 +139,13 @@ If you want to switch to a different local model, change the model name passed t
 - **Source Expanders**: Collapsible sections for viewing sources
 - **Clear Chat**: Button to reset conversation history
 
-## 🔒 Security Notes
 
-- Never commit your `.env` file to version control
-- Keep your API keys secure and private
-- The `.gitignore` file is configured to exclude sensitive files
 
-## 🐛 Troubleshooting
 
-### Issue: "OpenAI API key not found"
-**Solution**: Ensure you've created a `.env` file with `OPENAI_API_KEY=your_key`
-
-### Issue: "Could not extract text from PDF"
-**Solution**: The PDF might be scanned (image-based). Consider using OCR tools to convert scanned PDFs to text.
-
-### Issue: "FAISS installation error"
-**Solution**: If on Apple Silicon, you might need `faiss-cpu` instead. For GPU support, use `faiss-gpu`.
 
 ### Issue: Slow processing
 **Solution**: Large PDFs take time. For better performance, consider:
-- Using GPU for embeddings (if available)
+- Using GPU for embeddings 
 - Reducing chunk size
 - Processing PDFs in batches
 
@@ -196,11 +160,11 @@ If you want to switch to a different local model, change the model name passed t
 - [ ] PDF annotation and highlighting
 - [ ] User authentication and document management
 
-## 📝 License
+## License
 
 This project is open source and available under the MIT License.
 
-## 🤝 Contributing
+## Contributing
 
 Contributions, issues, and feature requests are welcome! Feel free to check the issues page.
 
@@ -213,16 +177,14 @@ Developed as a portfolio project demonstrating RAG (Retrieval-Augmented Generati
 - [LangChain Documentation](https://python.langchain.com/)
 - [Streamlit Documentation](https://docs.streamlit.io/)
 - [FAISS Documentation](https://github.com/facebookresearch/faiss)
-- [OpenAI API Documentation](https://platform.openai.com/docs)
+- [HuggingFace Documentation](https://huggingface.co/docs/transformers/index)
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Built with [Streamlit](https://streamlit.io/)
 - Powered by [LangChain](https://www.langchain.com/)
 - Vector search by [FAISS](https://github.com/facebookresearch/faiss)
-- LLM by [OpenAI](https://openai.com/)
+- LLM by [HuggingFace](https://huggingface.com)
 
 ---
-
-⭐ If you find this project helpful, please consider giving it a star!
 
