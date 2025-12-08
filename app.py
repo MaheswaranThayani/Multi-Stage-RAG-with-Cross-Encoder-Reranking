@@ -10,6 +10,7 @@ import html
 import numpy as np
 from sentence_transformers import SentenceTransformer, util
 import torch
+import textdistance
 
 # Core imports (always needed)
 try:
@@ -104,6 +105,63 @@ def calculate_semantic_similarity(question: str, context: str) -> Tuple[float, s
     return best_similarity, best_chunk
 
 
+def correct_spelling(query: str, vocabulary: set) -> str:
+    """Correct spelling mistakes in the query using vocabulary from the document."""
+    if not query or not vocabulary:
+        return query
+    
+    words = query.split()
+    corrected_words = []
+    
+    for word in words:
+        # Remove punctuation from word for matching
+        clean_word = re.sub(r'[^\w]', '', word.lower())
+        
+        if not clean_word or len(clean_word) < 3:
+            # Keep short words and punctuation as-is
+            corrected_words.append(word)
+            continue
+        
+        # Find the best match in vocabulary
+        best_match = None
+        best_score = float('inf')
+        
+        for vocab_word in vocabulary:
+            if len(vocab_word) < 3:
+                continue
+                
+            # Calculate Levenshtein distance
+            distance = textdistance.levenshtein(clean_word, vocab_word.lower())
+            
+            # Normalize by length to get similarity score
+            normalized_distance = distance / max(len(clean_word), len(vocab_word))
+            
+            # Accept matches with small differences (allowing for 1-2 character differences)
+            if normalized_distance < best_score and normalized_distance <= 0.3:  # 30% difference threshold
+                best_score = normalized_distance
+                best_match = vocab_word
+        
+        if best_match and best_score <= 0.3:
+            # Preserve original case pattern if possible
+            if word.isupper():
+                corrected_word = best_match.upper()
+            elif word[0].isupper():
+                corrected_word = best_match.capitalize()
+            else:
+                corrected_word = best_match
+            corrected_words.append(corrected_word)
+        else:
+            corrected_words.append(word)
+    
+    return ' '.join(corrected_words)
+
+
+def extract_vocabulary_from_text(text: str) -> set:
+    """Extract unique words from document text to build vocabulary."""
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+    return set(words)
+
+
 def generate_anti_hallucination_prompt(context: str, query: str, similarity_score: float) -> str:
     """Generate a prompt that reduces hallucinations."""
     return f"""You are an AI assistant that provides helpful and accurate information based on the provided context. 
@@ -124,13 +182,13 @@ Question: {query}
 Answer the question truthfully and concisely based on the context above. If the answer cannot be found in the context, say so:"""
 
 
-def question_has_overlap_with_context(question: str, context: str) -> bool:
+def question_has_overlap_with_context(question: str, context: str, vocabulary: set = None) -> bool:
     """Heuristic: check if any important word from the question appears in the
     retrieved context. This helps avoid answering about Sri Lanka when the
     user asks about India, etc.
 
     We ignore very short/common words and only keep keywords of length >= 4
-    that are not typical stopwords.
+    that are not typical stopwords. Now includes fuzzy matching for spelling errors.
     """
     if not question or not context:
         return False
@@ -161,18 +219,46 @@ def question_has_overlap_with_context(question: str, context: str) -> bool:
     for k in keywords:
         k_lower = k.lower()
         k_compact = k_lower.replace(" ", "")
-        if k_lower not in context_lower and k_compact not in context_compact:
+        
+        # First try exact match
+        if k_lower in context_lower or k_compact in context_compact:
+            continue
+            
+        # If vocabulary is provided, try fuzzy matching
+        if vocabulary:
+            found_match = False
+            for vocab_word in vocabulary:
+                if len(vocab_word) < 4:
+                    continue
+                    
+                # Calculate normalized Levenshtein distance
+                distance = textdistance.levenshtein(k_lower, vocab_word.lower())
+                normalized_distance = distance / max(len(k_lower), len(vocab_word))
+                
+                # Accept if very close match (20% difference threshold)
+                if normalized_distance <= 0.2:
+                    # Check if the corrected word exists in context
+                    corrected_word = vocab_word.lower()
+                    corrected_compact = corrected_word.replace(" ", "")
+                    if corrected_word in context_lower or corrected_compact in context_compact:
+                        found_match = True
+                        break
+            
+            if not found_match:
+                return False
+        else:
             return False
+    
     return True
 
 
-def context_has_sentence_with_all_keywords(question: str, context: str) -> bool:
+def context_has_sentence_with_all_keywords(question: str, context: str, vocabulary: set = None) -> bool:
     """Stricter check: is there at least one sentence in the context that
     contains all important keywords from the question?
 
     This helps cases like 'independence day of India' where 'India' might
     appear somewhere in the PDF, but never in the same sentence as the
-    other important words.
+    other important words. Now includes fuzzy matching for spelling errors.
     """
     if not question or not context:
         return False
@@ -192,8 +278,44 @@ def context_has_sentence_with_all_keywords(question: str, context: str) -> bool:
 
     for s in sentences:
         s_lower = s.lower()
-        if all(k.lower() in s_lower for k in keywords):
+        all_keywords_found = True
+        
+        for k in keywords:
+            k_lower = k.lower()
+            
+            # First try exact match
+            if k_lower in s_lower:
+                continue
+                
+            # If vocabulary is provided, try fuzzy matching
+            if vocabulary:
+                found_match = False
+                for vocab_word in vocabulary:
+                    if len(vocab_word) < 4:
+                        continue
+                        
+                    # Calculate normalized Levenshtein distance
+                    distance = textdistance.levenshtein(k_lower, vocab_word.lower())
+                    normalized_distance = distance / max(len(k_lower), len(vocab_word))
+                    
+                    # Accept if very close match (20% difference threshold)
+                    if normalized_distance <= 0.2:
+                        # Check if the corrected word exists in this sentence
+                        corrected_word = vocab_word.lower()
+                        if corrected_word in s_lower:
+                            found_match = True
+                            break
+                
+                if not found_match:
+                    all_keywords_found = False
+                    break
+            else:
+                all_keywords_found = False
+                break
+        
+        if all_keywords_found:
             return True
+    
     return False
 
 
@@ -227,6 +349,8 @@ if "qa_chain" not in st.session_state:
     st.session_state.qa_chain = None
 if "pdf_processed" not in st.session_state:
     st.session_state.pdf_processed = False
+if "vocabulary" not in st.session_state:
+    st.session_state.vocabulary = set()
 
 # Custom CSS for better UI
 st.markdown("""
@@ -388,11 +512,15 @@ with col_upload:
                         st.session_state.vector_store = vector_store
                         st.session_state.qa_chain = qa_chain
                         st.session_state.pdf_processed = True
+                        
+                        # Extract and store vocabulary for spell correction
+                        vocabulary = extract_vocabulary_from_text(text)
+                        st.session_state.vocabulary = vocabulary
 
                         # Clean up temp file
                         os.unlink(tmp_path)
 
-                        st.info(f"📊 Pages: {total_pages} | Chunks: {len(chunks)}")
+                        st.info(f"📊 Pages: {total_pages} | Chunks: {len(chunks)} | Vocabulary: {len(vocabulary)} words")
                         st.session_state.messages = []  # Clear previous chat
 
                 except Exception as e:
@@ -478,6 +606,12 @@ with col_chat:
                 st.rerun()
 
             try:
+                # Apply spell correction to the query using document vocabulary
+                corrected_query = correct_spelling(query, st.session_state.vocabulary)
+                
+                # Use corrected query for retrieval, but show original to user
+                retrieval_query = corrected_query
+                
                 # Retrieve components
                 qa_data = st.session_state.qa_chain
                 retriever = qa_data["retriever"]
@@ -485,9 +619,9 @@ with col_chat:
 
                 # Retrieve relevant documents (support modern retriever API)
                 if hasattr(retriever, "get_relevant_documents"):
-                    docs = retriever.get_relevant_documents(query)
+                    docs = retriever.get_relevant_documents(retrieval_query)
                 elif hasattr(retriever, "invoke"):
-                    docs = retriever.invoke(query)
+                    docs = retriever.invoke(retrieval_query)
                 else:
                     raise AttributeError(
                         "Retriever object does not support document lookup."
@@ -503,8 +637,8 @@ with col_chat:
                 #    important keywords together.
                 is_relevant = (
                     bool(context.strip())
-                    and question_has_overlap_with_context(query, context)
-                    and context_has_sentence_with_all_keywords(query, context)
+                    and question_has_overlap_with_context(corrected_query, context, st.session_state.vocabulary)
+                    and context_has_sentence_with_all_keywords(corrected_query, context, st.session_state.vocabulary)
                 )
 
                 if not is_relevant:
@@ -517,7 +651,7 @@ with col_chat:
 Context:
 {context}
 
-Question: {query}
+Question: {corrected_query}
 
 Answer:"""
 
