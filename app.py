@@ -3,10 +3,13 @@ import os
 from dotenv import load_dotenv
 import tempfile
 import importlib.util
-from typing import Any
+from typing import Any, List, Tuple
 from PyPDF2 import PdfReader
 import re
 import html
+import numpy as np
+from sentence_transformers import SentenceTransformer, util
+import torch
 
 # Core imports (always needed)
 try:
@@ -62,6 +65,63 @@ def highlight_relevant_sentence(source_text: str, answer_text: str) -> str:
             highlighted_sentences.append(sentence)
 
     return " ".join(highlighted_sentences)
+
+
+def split_into_chunks(text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
+    """Split text into smaller chunks with overlap."""
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk = ' '.join(words[i:i + chunk_size])
+        chunks.append(chunk)
+        if i + chunk_size >= len(words):
+            break
+    return chunks
+
+def calculate_semantic_similarity(question: str, context: str) -> Tuple[float, str]:
+    """Calculate semantic similarity between question and context using Sentence-BERT.
+    Returns a tuple of (max_similarity, best_chunk)"""
+    if not hasattr(st.session_state, 'semantic_model'):
+        st.session_state.semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    model = st.session_state.semantic_model
+    question_embedding = model.encode(question, convert_to_tensor=True)
+    
+    # Split context into smaller chunks
+    chunks = split_into_chunks(context)
+    if not chunks:
+        return 0.0, ""
+    
+    # Encode all chunks at once for better performance
+    chunk_embeddings = model.encode(chunks, convert_to_tensor=True)
+    similarities = util.pytorch_cos_sim(question_embedding.unsqueeze(0), chunk_embeddings)[0]
+    
+    # Find the chunk with highest similarity
+    max_idx = similarities.argmax().item()
+    best_similarity = float(similarities[max_idx])
+    best_chunk = chunks[max_idx]
+    
+    return best_similarity, best_chunk
+
+
+def generate_anti_hallucination_prompt(context: str, query: str, similarity_score: float) -> str:
+    """Generate a prompt that reduces hallucinations."""
+    return f"""You are an AI assistant that provides helpful and accurate information based on the provided context. 
+Your responses must adhere to these strict rules:
+
+1. ONLY use information from the provided context to answer the question.
+2. If the answer cannot be found in the context, respond with: "I don't have enough information to answer this question based on the provided document."
+3. Do not make up or assume any information that is not explicitly stated in the context.
+4. If the question is ambiguous or unclear, ask for clarification.
+5. The context relevance score is {similarity_score:.2f}/1.00. Lower scores indicate the context may not be very relevant.
+
+Context relevance: {similarity_score:.2f}/1.00
+----------------
+Context: {context}
+----------------
+Question: {query}
+
+Answer the question truthfully and concisely based on the context above. If the answer cannot be found in the context, say so:"""
 
 
 def question_has_overlap_with_context(question: str, context: str) -> bool:
