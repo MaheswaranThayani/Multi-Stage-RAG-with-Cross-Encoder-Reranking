@@ -35,7 +35,7 @@ A Retrieval-Augmented Generation (RAG) based PDF Question Answering application 
 | Text Extraction | PyPDF2 |
 | Text Splitting | LangChain RecursiveCharacterTextSplitter |
 | Embeddings | HuggingFace Sentence Transformers |
-| Vector Store | FAISS |
+| Vector Store | CromaDB |
 | Language Model | Local HuggingFace text2text model (`google/flan-t5-small` by default) |
 
 ##  Prerequisites
@@ -114,7 +114,7 @@ If you want to switch to a different local model, change the model name passed t
 2. **Text Extraction**: PyPDF2 extracts text from all pages of the PDF
 3. **Text Chunking**: RecursiveCharacterTextSplitter divides text into overlapping chunks (1000 chars with 200 char overlap)
 4. **Embedding Generation**: Each chunk is converted to a vector using HuggingFace embeddings
-5. **Vector Storage**: FAISS stores all chunk embeddings for efficient similarity search
+5. **Vector Storage**: CromaDB stores all chunk embeddings for efficient Hybrid search
 6. **Question Processing**: User's question is embedded using the same embedding model
 7. **Retrieval**: FAISS finds the top-k most similar chunks to the question
 8. **Answer Generation**: A local HuggingFace pipeline receives the top chunks as context and generates an answer using **only that context**
