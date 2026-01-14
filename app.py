@@ -9,7 +9,6 @@ import re
 import html
 import numpy as np
 from sentence_transformers import SentenceTransformer, util
-import torch
 import textdistance
 from langchain_community.retrievers import BM25Retriever
 
@@ -19,29 +18,29 @@ from nltk.corpus import stopwords
 
 CHROMA_DB_DIR = "./chroma_db"   # permanent storage location
 os.makedirs(CHROMA_DB_DIR, exist_ok=True)
-#hybrid retriever
-def hybrid_retrieve(query, semantic_retriever, bm25_retriever):
-    # --- Semantic retriever (Chroma / VectorStore) ---
-    if hasattr(semantic_retriever, "invoke"):
-        semantic_docs = semantic_retriever.invoke(query)
-    else:
-        semantic_docs = semantic_retriever.get_relevant_documents(query)
+# #hybrid retriever
+# def hybrid_retrieve(query, semantic_retriever, bm25_retriever):
+#     # --- Semantic retriever (Chroma / VectorStore) ---
+#     if hasattr(semantic_retriever, "invoke"):
+#         semantic_docs = semantic_retriever.invoke(query)
+#     else:
+#         semantic_docs = semantic_retriever.get_relevant_documents(query)
 
-    # --- Keyword retriever (BM25) ---
-    if hasattr(bm25_retriever, "invoke"):
-        keyword_docs = bm25_retriever.invoke(query)
-    else:
-        keyword_docs = bm25_retriever.get_relevant_documents(query)
+#     # --- Keyword retriever (BM25) ---
+#     if hasattr(bm25_retriever, "invoke"):
+#         keyword_docs = bm25_retriever.invoke(query)
+#     else:
+#         keyword_docs = bm25_retriever.get_relevant_documents(query)
 
-    seen = set()
-    docs = []
+#     seen = set()
+#     docs = []
 
-    for d in semantic_docs + keyword_docs:
-        if d.page_content not in seen:
-            seen.add(d.page_content)
-            docs.append(d)
+#     for d in semantic_docs + keyword_docs:
+#         if d.page_content not in seen:
+#             seen.add(d.page_content)
+#             docs.append(d)
 
-    return docs
+#     return docs
 
 
 
@@ -121,6 +120,43 @@ def split_into_chunks(text: str, chunk_size: int = 1000, overlap: int = 200) -> 
         if i + chunk_size >= len(words):
             break
     return chunks
+
+def is_followup_question(query: str) -> bool:
+    """Detect if query is a vague follow-up that needs context."""
+    vague_patterns = [
+        r"^what\s+(are|is|were|was)\s+(they|it|those|these|that|this)\??$",
+        r"^(tell|explain|describe|list)\s+(me\s+)?(more|them|it|those|these)\??$",
+        r"^(and|also|what about)\s+(the\s+)?(others?|rest|more)\??$",
+        r"^(can you|please)\s+(explain|list|tell)\s+(them|it|more)\??$",
+        r"^(how|why|when|where)\??$",
+        r"^(yes|no|okay|go on|continue)\??$",
+    ]
+    q = query.strip().lower()
+    for pattern in vague_patterns:
+        if re.match(pattern, q):
+            return True
+    words = q.split()
+    if len(words) <= 4 and any(w in ["they", "it", "them", "those", "these", "that", "this"] for w in words):
+        return True
+    return False
+
+
+def expand_with_context(query: str, messages: List[dict]) -> str:
+    """Expand vague follow-up with previous Q&A context."""
+    if not messages or not is_followup_question(query):
+        return query
+    
+    last_qa = []
+    for msg in reversed(messages[-4:]):
+        if msg["role"] == "user":
+            last_qa.insert(0, f"Q: {msg['content']}")
+        elif msg["role"] == "assistant" and "sources" in msg:
+            last_qa.insert(0, f"A: {msg['content']}")
+    
+    if last_qa:
+        context_str = " ".join(last_qa)
+        return f"{context_str} {query}"
+    return query
 
 
 
@@ -208,151 +244,143 @@ def extract_vocabulary_from_text(text: str) -> set:
     return set(words)
 
 
-def generate_anti_hallucination_prompt(context: str, query: str, similarity_score: float) -> str:
-    """Generate a prompt that reduces hallucinations."""
-    return f"""You are an AI assistant that provides helpful and accurate information based on the provided context. 
-Your responses must adhere to these strict rules:
+# def generate_anti_hallucination_prompt(context: str, query: str, similarity_score: float) -> str:
+#     """Generate a prompt that reduces hallucinations."""
+#     return f"""You are an AI assistant that provides helpful and accurate information based on the provided context. 
+# Your responses must adhere to these strict rules:
 
-1. ONLY use information from the provided context to answer the question.
-2. If the answer cannot be found in the context, respond with: "I don't have enough information to answer this question based on the provided document."
-3. Do not make up or assume any information that is not explicitly stated in the context.
-4. If the question is ambiguous or unclear, ask for clarification.
-5. The context relevance score is {similarity_score:.2f}/1.00. Lower scores indicate the context may not be very relevant.
+# 1. ONLY use information from the provided context to answer the question.
+# 2. If the answer cannot be found in the context, respond with: "I don't have enough information to answer this question based on the provided document."
+# 3. Do not make up or assume any information that is not explicitly stated in the context.
+# 4. If the question is ambiguous or unclear, ask for clarification.
+# 5. The context relevance score is {similarity_score:.2f}/1.00. Lower scores indicate the context may not be very relevant.
 
-Context relevance: {similarity_score:.2f}/1.00
-----------------
-Context: {context}
-----------------
-Question: {query}
+# Context relevance: {similarity_score:.2f}/1.00
+# ----------------
+# Context: {context}
+# ----------------
+# Question: {query}
 
-Answer the question truthfully and concisely based on the context above. If the answer cannot be found in the context, say so:"""
-
-
-def question_has_overlap_with_context(question: str, context: str, vocabulary: set = None) -> bool:
-    """Heuristic: check if any important word from the question appears in the
-    retrieved context. This helps avoid answering about Sri Lanka when the
-    user asks about India, etc.
-
-    We ignore very short/common words and only keep keywords of length >= 4
-    that are not typical stopwords. Now includes fuzzy matching for spelling errors.
-    """
-    if not question or not context:
-        return False
-
-    context_lower = context.lower()
-    context_compact = context_lower.replace(" ", "")  # for matching without spaces
-    words = re.findall(r"\w+", question.lower())
-    stopwords = EN_STOPWORDS
+# Answer the question truthfully and concisely based on the context above. If the answer cannot be found in the context, say so:"""
 
 
-    keywords = [w for w in words if len(w) >= 4 and w not in stopwords]
-    if not keywords:
-        return False
+# def question_has_overlap_with_context(question: str, context: str, vocabulary: set = None) -> bool:
+#     """Heuristic: check if any important word from the question appears in the
+#     retrieved context. This helps avoid answering about Sri Lanka when the
+#     user asks about India, etc.
 
-    # Be conservative: require that *all* important keywords appear in the
-    # retrieved context. For example, for "independent day of India" we
-    # require that something like "india" also appears, so we don't answer
-    # from Sri Lanka paragraphs.
-    #
-    # To handle minor formatting differences such as missing spaces
-    # ("srilanka" vs "sri lanka"), we also compare against a space-free
-    # version of the context.
-    for k in keywords:
-        k_lower = k.lower()
-        k_compact = k_lower.replace(" ", "")
+#     We ignore very short/common words and only keep keywords of length >= 4
+#     that are not typical stopwords. Now includes fuzzy matching for spelling errors.
+#     """
+#     if not question or not context:
+#         return False
+
+#     context_lower = context.lower()
+#     context_compact = context_lower.replace(" ", "")  # for matching without spaces
+#     words = re.findall(r"\w+", question.lower())
+#     stopwords = EN_STOPWORDS
+
+
+#     keywords = [w for w in words if len(w) >= 4 and w not in stopwords]
+#     if not keywords:
+#         return False
+
+#     # Be conservative: require that *all* important keywords appear in the
+#     # retrieved context. For example, for "independent day of India" we
+#     # require that something like "india" also appears, so we don't answer
+#     # from Sri Lanka paragraphs.
+#     #
+#     # To handle minor formatting differences such as missing spaces
+#     # ("srilanka" vs "sri lanka"), we also compare against a space-free
+#     # version of the context.
+#     for k in keywords:
+#         k_lower = k.lower()
+#         k_compact = k_lower.replace(" ", "")
         
-        # First try exact match
-        if k_lower in context_lower or k_compact in context_compact:
-            continue
+#         # First try exact match
+#         if k_lower in context_lower or k_compact in context_compact:
+#             continue
             
-        # If vocabulary is provided, try fuzzy matching
-        if vocabulary:
-            found_match = False
-            for vocab_word in vocabulary:
-                if len(vocab_word) < 4:
-                    continue
+#         # If vocabulary is provided, try fuzzy matching
+#         if vocabulary:
+#             found_match = False
+#             for vocab_word in vocabulary:
+#                 if len(vocab_word) < 4:
+#                     continue
                     
-                # Calculate normalized Levenshtein distance
-                distance = textdistance.levenshtein(k_lower, vocab_word.lower())
-                normalized_distance = distance / max(len(k_lower), len(vocab_word))
+#                 # Calculate normalized Levenshtein distance
+#                 distance = textdistance.levenshtein(k_lower, vocab_word.lower())
+#                 normalized_distance = distance / max(len(k_lower), len(vocab_word))
                 
-                # Accept if very close match (20% difference threshold)
-                if normalized_distance <= 0.2:
-                    # Check if the corrected word exists in context
-                    corrected_word = vocab_word.lower()
-                    corrected_compact = corrected_word.replace(" ", "")
-                    if corrected_word in context_lower or corrected_compact in context_compact:
-                        found_match = True
-                        break
+#                 # Accept if very close match (20% difference threshold)
+#                 if normalized_distance <= 0.2:
+#                     # Check if the corrected word exists in context
+#                     corrected_word = vocab_word.lower()
+#                     corrected_compact = corrected_word.replace(" ", "")
+#                     if corrected_word in context_lower or corrected_compact in context_compact:
+#                         found_match = True
+#                         break
             
-            if not found_match:
-                return False
-        else:
-            return False
+#             if not found_match:
+#                 return False
+#         else:
+#             return False
     
-    return True
+#     return True
 
 
-def context_has_sentence_with_all_keywords(question: str, context: str, vocabulary: set = None) -> bool:
-    """Stricter check: is there at least one sentence in the context that
-    contains all important keywords from the question?
+def compute_semantic_similarity(text1: str, text2: str, embeddings_model) -> float:
+    """Compute cosine similarity between two texts using embeddings."""
+    try:
+        emb1 = embeddings_model.embed_query(text1)
+        emb2 = embeddings_model.embed_query(text2)
+        emb1 = np.array(emb1)
+        emb2 = np.array(emb2)
+        similarity = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
+        return float(similarity)
+    except Exception:
+        return 0.0
 
-    This helps cases like 'independence day of India' where 'India' might
-    appear somewhere in the PDF, but never in the same sentence as the
-    other important words. Now includes fuzzy matching for spelling errors.
+
+def compute_max_chunk_similarity(query: str, docs: list, embeddings_model) -> float:
+    """Compute max similarity between query and individual document chunks."""
+    if not docs or not embeddings_model:
+        return 0.0
+    try:
+        query_emb = np.array(embeddings_model.embed_query(query))
+        max_sim = 0.0
+        for doc in docs:
+            chunk_emb = np.array(embeddings_model.embed_query(doc.page_content))
+            sim = np.dot(query_emb, chunk_emb) / (np.linalg.norm(query_emb) * np.linalg.norm(chunk_emb))
+            max_sim = max(max_sim, float(sim))
+        return max_sim
+    except Exception:
+        return 0.0
+
+
+def validate_answer_grounding(answer: str, context: str, embeddings_model=None) -> Tuple[bool, float]:
+    """Validate that the answer is grounded in the context.
+    Uses PURE semantic similarity - no keyword matching.
+    Returns (is_grounded, score).
     """
-    if not question or not context:
-        return False
-
-    sentences = re.split(r"(?<=[.!?])\s+", context)
-    words = re.findall(r"\w+", question.lower())
-    stopwords = EN_STOPWORDS
-
-    keywords = [w for w in words if len(w) >= 4 and w not in stopwords]
-    if not keywords:
-        return False
-
-    for s in sentences:
-        s_lower = s.lower()
-        all_keywords_found = True
-        
-        for k in keywords:
-            k_lower = k.lower()
-            
-            # First try exact match
-            if k_lower in s_lower:
-                continue
-                
-            # If vocabulary is provided, try fuzzy matching
-            if vocabulary:
-                found_match = False
-                for vocab_word in vocabulary:
-                    if len(vocab_word) < 4:
-                        continue
-                        
-                    # Calculate normalized Levenshtein distance
-                    distance = textdistance.levenshtein(k_lower, vocab_word.lower())
-                    normalized_distance = distance / max(len(k_lower), len(vocab_word))
-                    
-                    # Accept if very close match (20% difference threshold)
-                    if normalized_distance <= 0.2:
-                        # Check if the corrected word exists in this sentence
-                        corrected_word = vocab_word.lower()
-                        if corrected_word in s_lower:
-                            found_match = True
-                            break
-                
-                if not found_match:
-                    all_keywords_found = False
-                    break
-            else:
-                all_keywords_found = False
-                break
-        
-        if all_keywords_found:
-            return True
+    if not answer or not context:
+        return False, 0.0
     
-    return False
+    # Short answers are usually extracted directly - trust them
+    if len(answer.split()) <= 15:
+        return True, 1.0
+    
+    # Pure semantic check
+    if embeddings_model:
+        try:
+            semantic_score = compute_semantic_similarity(answer, context, embeddings_model)
+            is_grounded = semantic_score >= 0.4
+            return is_grounded, semantic_score
+        except Exception:
+            pass
+    
+    # Fallback: if no embeddings, trust the answer
+    return True, 1.0
 
 
 # Cached local HuggingFace pipeline (avoids remote API limits)
@@ -538,14 +566,31 @@ with col_upload:
                             )
                             vector_store.persist()
 
-                            # --- Create retrievers  ---
-                        semantic_retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+                        # Create QA chain (only if an LLM is configured)
+                        retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 
-                        bm25_retriever = BM25Retriever.from_texts(chunks)
-                        bm25_retriever.k = 5
+                        if llm is not None:
+                            if HAS_RETRIEVALQA:
+                                # Use RetrievalQA if available
+                                qa_chain = RetrievalQA.from_chain_type(
+                                    llm=llm,
+                                    retriever=retriever,
+                                    return_source_documents=True
+                                )
+                            else:
+                                # Simple approach: store retriever and llm separately
+                                qa_chain = {
+                                    "retriever": retriever,
+                                    "llm": llm
+                                }
+                        else:
+                            qa_chain = None
 
-                        st.session_state.semantic_retriever = semantic_retriever
-                        st.session_state.bm25_retriever = bm25_retriever
+                        # Store in session state
+                        st.session_state.vector_store = vector_store
+                        st.session_state.qa_chain = qa_chain
+                        st.session_state.pdf_processed = True
+                        st.session_state.embeddings_model = embeddings
 
                         
 
@@ -554,13 +599,14 @@ with col_upload:
                         # --- Semantic retriever (existing) ---
                      # Semantic retriever (Chroma embeddings)
                         # Semantic retriever (vector similarity)
-                        semantic_retriever = vector_store.as_retriever(
-                            search_kwargs={"k": 3}
-                        )
+                        #********************************************************************************
+                        # semantic_retriever = vector_store.as_retriever(
+                        #     search_kwargs={"k": 3}
+                        # )
 
-                        # Keyword retriever (BM25)
-                        bm25_retriever = BM25Retriever.from_texts(chunks)
-                        bm25_retriever.k = 3
+                        # # Keyword retriever (BM25)
+                        # bm25_retriever = BM25Retriever.from_texts(chunks)
+                        # bm25_retriever.k = 3
 
                        
 
@@ -587,12 +633,32 @@ with col_upload:
                         # else:
                         #     qa_chain = None
                         # Store LLM only (NO retrieval here)
-                       # Store objects in session state
-                        st.session_state.vector_store = vector_store
-                        st.session_state.qa_chain = {
-                            "llm": llm
-                        }
-                        st.session_state.pdf_processed = True
+
+                                                # Create QA chain (only if an LLM is configured)
+                        #retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+
+                    #     if llm is not None:
+                    #         if HAS_RETRIEVALQA:
+                    #             # Use RetrievalQA if available
+                    #             qa_chain = RetrievalQA.from_chain_type(
+                    #                 llm=llm,
+                    #                 retriever=retriever,
+                    #                 return_source_documents=True
+                    #             )
+                    #         else:
+                    #             # Simple approach: store retriever and llm separately
+                    #             qa_chain = {
+                    #                 "retriever": retriever,
+                    #                 "llm": llm
+                    #             }
+                    #     else:
+                    #         qa_chain = None
+                    #    # Store objects in session state
+                    #     st.session_state.vector_store = vector_store
+                    #     st.session_state.qa_chain = {
+                    #         "llm": llm
+                    #     }
+                    #     st.session_state.pdf_processed = True
 
                         
                         # Extract and store vocabulary for spell correction
@@ -625,6 +691,7 @@ with col_upload:
                 border-color: #16a34a !important;
                 color: #ffffff !important;
             }
+            
             </style>
             """,
             unsafe_allow_html=True,
@@ -664,141 +731,111 @@ with col_chat:
                             f"<div class='source-panel'>{combined_html}</div>",
                             unsafe_allow_html=True,
                         )
-
-        # Question input at the bottom of the ask section
         query = st.chat_input("Ask a question about the PDF:")
 
         if query:
-            # Basic validation: ignore extremely short/noisy queries such as
-            # single letters or random characters, which lead to meaningless
-            # retrieval results.
+            # Save query in session_state so input doesn't disappear
+            st.session_state.user_question = query
+            st.session_state.messages.append({"role": "user", "content": query})
+
+            # Validate query
             cleaned = query.strip()
-            # Count alphanumeric characters only
             alnum_only = "".join(ch for ch in cleaned if ch.isalnum())
             if len(alnum_only) < 3 or len(cleaned.split()) < 1:
                 warning_msg = "Please enter a more specific question based on the PDF content."
-                st.session_state.messages.append({
-                    "role": "user",
-                    "content": query,
-                })
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": warning_msg,
-                })
+                st.session_state.messages.append({"role": "assistant", "content": warning_msg})
                 st.rerun()
 
+            # Retrieval + Answer
             try:
-                # Apply spell correction to the query using document vocabulary
-                corrected_query = correct_spelling(query, st.session_state.vocabulary)
-                
-                # Use corrected query for retrieval, but show original to user
-                retrieval_query = corrected_query
-                
-                # Retrieve components
-                # qa_data = st.session_state.qa_chain
-                # retriever = qa_data["retriever"]
-                # llm = qa_data["llm"]
+                qa_data = st.session_state.qa_chain
+                retriever = qa_data["retriever"]
+                llm = qa_data["llm"]
 
-                # # Retrieve relevant documents (support modern retriever API)
-                # # Semantic retriever
-                # semantic_retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+                # Expand with context
+                expanded_query = expand_with_context(query, st.session_state.messages)
+                search_query = expanded_query if expanded_query != query else query
 
-                #     # Keyword retriever (BM25)
-                # bm25_retriever = BM25Retriever.from_texts(chunks)
-                # bm25_retriever.k = 5
+                # Get documents
+                if hasattr(retriever, "get_relevant_documents"):
+                    docs = retriever.get_relevant_documents(search_query)
+                elif hasattr(retriever, "invoke"):
+                    docs = retriever.invoke(search_query)
+                else:
+                    docs = []
 
-                # docs = hybrid_retrieve(
-                #     retrieval_query,
-                #     st.session_state.semantic_retriever,
-                #     st.session_state.bm25_retriever
-                # )
-                llm = st.session_state.qa_chain["llm"]  # keep LLM from session
+                context = "\n\n".join([d.page_content for d in docs]) if docs else ""
 
-                docs = hybrid_retrieve(
-                    retrieval_query,
-                    st.session_state.semantic_retriever,
-                    st.session_state.bm25_retriever
-                )
+                # Semantic check
+                semantic_score = 0.0
+                if docs and st.session_state.embeddings_model:
+                    semantic_score = compute_max_chunk_similarity(search_query, docs, st.session_state.embeddings_model)
 
-
-                            # Merge + deduplicate (by content)
-                
-
-
-                # Build conversational history for context
-                history_text = ""
-                for chat in st.session_state.messages:
-                    if chat["role"] == "user":
-                        history_text += f"User: {chat['content']}\n"
-                    elif chat["role"] == "assistant":
-                        history_text += f"Assistant: {chat['content']}\n"
-
-                # Build full context from retrieved chunks
-                context = "\n\n".join([doc.page_content for doc in docs]) if docs else ""
-
-                # Relevance gate: only answer when
-                #  - there is non-empty context, AND
-                #  - all important keywords appear somewhere in the context, AND
-                #  - at least one sentence in the context contains all
-                #    important keywords together.
-                is_relevant = (
-                    bool(context.strip())
-                    and question_has_overlap_with_context(corrected_query, context, st.session_state.vocabulary)
-                    and context_has_sentence_with_all_keywords(corrected_query, context, st.session_state.vocabulary)
-                )
+                SEMANTIC_THRESHOLD = 0.35
+                is_relevant = bool(context.strip()) and semantic_score >= SEMANTIC_THRESHOLD
 
                 if not is_relevant:
-                    answer = "There is no proper answer for this question in your PDF. It may be about a topic that is not covered."
+                    if not context.strip():
+                        answer = "No relevant content found in the PDF. Please try rephrasing your question."
+                    else:
+                        answer = f"The question doesn't seem related to the PDF content (score: {semantic_score:.2f}). Try asking something more specific to the document."
                     sources_text = []
                 else:
-                    # Generate answer using local HuggingFace pipeline
-                    prompt = f"""Answer the following question using ONLY the context below. If the answer is not in the context, reply with "I don't have enough information to answer this question."
+                    # Use expanded query for better context in follow-up questions
+                    question_for_llm = search_query if search_query != query else query
+                    
+                    # Build conversation history for context
+                    chat_history = ""
+                    recent_msgs = st.session_state.messages[-6:]  # Last 3 Q&A pairs
+                    for msg in recent_msgs:
+                        if msg["role"] == "user":
+                            chat_history += f"User: {msg['content']}\n"
+                        elif msg["role"] == "assistant":
+                            chat_history += f"Assistant: {msg['content']}\n"
 
-Conversation History:
-{history_text}
 
-Context:
+
+                    # System prompt for consistent behavior
+                    system_prompt = """You are a precise document assistant. Your rules:
+1. Answer ONLY using information from the provided context
+2. If asked "what are they" or similar, list ALL items mentioned for that topic
+3. Be specific and complete - list all relevant details
+4. If information is not in context, say "I don't have that information"
+5. Never make up facts or use external knowledge"""
+
+                    prompt = f"""{system_prompt}
+
+{f"Previous conversation:{chr(10)}{chat_history}" if chat_history else ""}
+
+Context from document:
 {context}
 
-Question: {corrected_query}
+Current question: {question_for_llm}
 
 Answer:"""
 
                     llm_output = llm(
                         prompt,
-                        max_new_tokens=80,      # Further reduced to prevent long repetitive outputs
-                        do_sample=True,         # Enable sampling for variety
-                        temperature=0.8,         # Higher temperature for more creativity
-                        top_p=0.9,             # Nucleus sampling to avoid repetitive tokens
-                        repetition_penalty=1.2, # Penalize repeating tokens/phrases
-                        no_repeat_ngram_size=3, # Prevent repeating 3-gram sequences
+                        max_new_tokens=300,
+                        do_sample=False,
                     )
-                    # Extract only the generated answer, not the full prompt+answer
-                    full_text = llm_output[0]["generated_text"] if llm_output else ""
-                    # Remove the prompt from the beginning to get only the answer
-                    if full_text.startswith(prompt):
-                        answer = full_text[len(prompt):].strip()
+                    raw_answer = llm_output[0]["generated_text"].strip() if llm_output else ""
+                    
+                    # Step 3: Post-generation validation - check answer is grounded
+                    is_grounded, grounding_score = validate_answer_grounding(
+                        raw_answer, context, st.session_state.embeddings_model
+                    )
+                    
+                    # Debug grounding in sidebar
+                    with st.sidebar:
+                        st.write(f"📎 Grounding Score: {grounding_score:.3f}")
+                        st.write(f"✅ Grounded: {is_grounded}")
+                    
+                    if not raw_answer or not is_grounded:
+                        answer = "I couldn't find a reliable answer in the PDF for this question."
                     else:
-                        # Alternative: split on "Answer:" and take the part after it
-                        answer = full_text.split("Answer:")[-1].strip() if "Answer:" in full_text else full_text.strip()
+                        answer = raw_answer
                     
-                    # Post-process to remove repeated sentences
-                    if answer:
-                        sentences = answer.split('. ')
-                        unique_sentences = []
-                        seen = set()
-                        for sentence in sentences:
-                            sentence = sentence.strip()
-                            if sentence and sentence not in seen:
-                                seen.add(sentence)
-                                unique_sentences.append(sentence)
-                        answer = '. '.join(unique_sentences)
-                        if answer and not answer.endswith('.'):
-                            answer += '.'
-                    
-                    # If answer is empty after processing, provide fallback
-                    if not answer:
-                        answer = "I couldn't generate a proper answer from the context."
                     sources_text = [doc.page_content for doc in docs] if docs else []
 
                 # Update chat history (user question + assistant answer)
@@ -810,16 +847,14 @@ Answer:"""
                 })
 
             except Exception as e:
-                import traceback
-                error_msg = f"❌ Error generating answer: {str(e)}"
+                error_msg = "❌ An error occurred while processing your question. Please try again."
+                st.session_state.messages.append({
+                    "role": "user",
+                    "content": query,
+                })
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": error_msg,
-                })
-                # Optionally log traceback for debugging in the UI
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": traceback.format_exc(),
                 })
 
             # Rerun so that the updated history is rendered above and the input
@@ -835,11 +870,10 @@ Answer:"""
 st.markdown(
     """
     <div class='chat-footer-note'>
-      Built with ❤️ using Streamlit, LangChain, ChromoDB, and HuggingFace
+      Built with ❤️ using Streamlit, LangChain, FAISS, and HuggingFace
     </div>
     """,
     unsafe_allow_html=True,
 )
 
 st.markdown("---")
-
