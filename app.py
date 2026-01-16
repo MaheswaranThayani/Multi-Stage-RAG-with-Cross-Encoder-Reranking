@@ -61,7 +61,7 @@ try:
     USE_MODERN_LANGCHAIN = True
 except ImportError:
     # Fallback to older version
-    from langchain.text_splitter import RecursiveCharacterTextSplitter  # pyright: ignore[reportMissingImports]
+    from langchain_text_splitters import RecursiveCharacterTextSplitter  # pyright: ignore[reportMissingImports]
     from langchain.vectorstores import Chroma  # pyright: ignore[reportMissingImports]
     USE_MODERN_LANGCHAIN = False
 
@@ -407,12 +407,54 @@ st.set_page_config(
 # Initialize session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "vector_store" not in st.session_state:
-    st.session_state.vector_store = None
+if "vector_store" not in st.session_state or st.session_state.vector_store is None:
+    # Load and process Sri_lanka_history.pdf at startup
+    pdf_path = os.path.join("Data", "Sri_lanka_history.pdf")
+    if os.path.exists(pdf_path):
+        pdf_reader = PdfReader(pdf_path)
+        text = ""
+        for page in pdf_reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text
+        # Split text into chunks
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=100,
+            length_function=len
+        )
+        chunks = splitter.split_text(text)
+        # Create embeddings and vector store
+        try:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+        except ImportError:
+            from langchain.embeddings import HuggingFaceEmbeddings
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+        from langchain_community.vectorstores import Chroma
+        vector_store = Chroma.from_texts(
+            texts=chunks,
+            embedding=embeddings,
+            persist_directory=CHROMA_DB_DIR
+        )
+        vector_store.persist()
+        # Configure local HuggingFace pipeline (no external API calls)
+        llm = load_local_hf_pipeline("google/flan-t5-small")
+        retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+        qa_chain = {"retriever": retriever, "llm": llm}
+        st.session_state.vector_store = vector_store
+        st.session_state.qa_chain = qa_chain
+        st.session_state.embeddings_model = embeddings
+        st.session_state.vocabulary = set()
+    else:
+        st.session_state.vector_store = None
+        st.session_state.qa_chain = None
+        st.session_state.embeddings_model = None
+        st.session_state.vocabulary = set()
 if "qa_chain" not in st.session_state:
     st.session_state.qa_chain = None
-if "pdf_processed" not in st.session_state:
-    st.session_state.pdf_processed = False
 if "vocabulary" not in st.session_state:
     st.session_state.vocabulary = set()
 
@@ -490,320 +532,132 @@ with st.sidebar:
     - Ask questions about the content
     - Get accurate answers with source references
     
-    Built with LangChain, Streamlit, FAISS, and HuggingFace.
+    Built with LangChain, Streamlit, CromaDB, and HuggingFace.
     """)
 
-# Main two-column layout: left = upload, right = Q&A
-col_upload, col_chat = st.columns(2)
-
-with col_upload:
-    # SECTION 1: Upload PDF document (left side)
-    st.markdown("<div class='upload-sticky'>", unsafe_allow_html=True)
-
-    st.subheader("📤 Upload PDF Document")
-    uploaded_file = st.file_uploader(
-        "Choose a PDF file",
-        type="pdf",
-        help="Upload a PDF document to start asking questions"
-    )
-
-    if uploaded_file:
-        # Process PDF button
-        if st.button("🔄 Process PDF", type="primary"):
-            with st.spinner("📑 Processing PDF... This may take a moment."):
-                try:
-                    # Save uploaded file temporarily
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                        tmp_file.write(uploaded_file.read())
-                        tmp_path = tmp_file.name
-
-                    # Extract text from PDF
-                    pdf_reader = PdfReader(tmp_path)
-                    text = ""
-                    total_pages = len(pdf_reader.pages)
-
-                    for page in pdf_reader.pages:
-                        text += page.extract_text()
-
-                    if not text.strip():
-                        st.error("❌ Could not extract text from PDF. The file might be scanned or encrypted.")
-                        st.session_state.pdf_processed = False
-                    else:
-                        # Split text into chunks
-                        splitter = RecursiveCharacterTextSplitter(
-                            chunk_size=1000,
-                            chunk_overlap=200,
-                            length_function=len
-                        )
-                        chunks = splitter.split_text(text)
-
-                        # Create embeddings and vector store (HuggingFace only)
-                        # Lazy import to avoid loading if not needed
-                        try:
-                            from langchain_community.embeddings import HuggingFaceEmbeddings
-                        except ImportError:
-                            from langchain.embeddings import HuggingFaceEmbeddings
-                        embeddings = HuggingFaceEmbeddings(
-                            model_name="sentence-transformers/all-MiniLM-L6-v2"
-                        )
-
-                        # Configure local HuggingFace pipeline (no external API calls)
-                        llm = load_local_hf_pipeline("google/flan-t5-small")
-
-                        # Create ChromaDB vector store with persistent storage
-                        import tempfile
-                        #persist_directory = tempfile.mkdtemp()
-                        if os.path.exists(os.path.join(CHROMA_DB_DIR, "chroma.sqlite3")):
-                                vector_store = Chroma(
-                                persist_directory=CHROMA_DB_DIR,
-                                embedding_function=embeddings
-                            )
-                        else:
-                            vector_store = Chroma.from_texts(
-                                texts=chunks,
-                                embedding=embeddings,
-                                persist_directory=CHROMA_DB_DIR
-                            )
-                            vector_store.persist()
-
-                        # Create QA chain (only if an LLM is configured)
-                        retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-
-                        if llm is not None:
-                            if HAS_RETRIEVALQA:
-                                # Use RetrievalQA if available
-                                qa_chain = RetrievalQA.from_chain_type(
-                                    llm=llm,
-                                    retriever=retriever,
-                                    return_source_documents=True
-                                )
-                            else:
-                                # Simple approach: store retriever and llm separately
-                                qa_chain = {
-                                    "retriever": retriever,
-                                    "llm": llm
-                                }
-                        else:
-                            qa_chain = None
-
-                        # Store in session state
-                        st.session_state.vector_store = vector_store
-                        st.session_state.qa_chain = qa_chain
-                        st.session_state.pdf_processed = True
-                        st.session_state.embeddings_model = embeddings
-
-                        
-
-                        # Create QA chain (only if an LLM is configured)
-                        # Hybrid retriever: combine semantic + keyword search
-                        # --- Semantic retriever (existing) ---
-                     # Semantic retriever (Chroma embeddings)
-                        # Semantic retriever (vector similarity)
-                        #********************************************************************************
-                        # semantic_retriever = vector_store.as_retriever(
-                        #     search_kwargs={"k": 3}
-                        # )
-
-                        # # Keyword retriever (BM25)
-                        # bm25_retriever = BM25Retriever.from_texts(chunks)
-                        # bm25_retriever.k = 3
-
-                       
-
-
-
-
-
-                        # if llm is not None:
-                        #     if HAS_RETRIEVALQA:
-                        #         # Use RetrievalQA if available
-                        #         qa_chain = RetrievalQA.from_chain_type(
-                        #             llm=llm,
-                        #             return_source_documents=True
-                        #         )
-                        #     else:
-                        #         # Simple approach: store retriever and llm separately
-                        #         docs = hybrid_retrieve(
-                        #                 retrieval_query,
-                        #                 st.session_state.semantic_retriever,
-                        #                 st.session_state.bm25_retriever
-                        #         )
-
-
-                        # else:
-                        #     qa_chain = None
-                        # Store LLM only (NO retrieval here)
-
-                                                # Create QA chain (only if an LLM is configured)
-                        #retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-
-                    #     if llm is not None:
-                    #         if HAS_RETRIEVALQA:
-                    #             # Use RetrievalQA if available
-                    #             qa_chain = RetrievalQA.from_chain_type(
-                    #                 llm=llm,
-                    #                 retriever=retriever,
-                    #                 return_source_documents=True
-                    #             )
-                    #         else:
-                    #             # Simple approach: store retriever and llm separately
-                    #             qa_chain = {
-                    #                 "retriever": retriever,
-                    #                 "llm": llm
-                    #             }
-                    #     else:
-                    #         qa_chain = None
-                    #    # Store objects in session state
-                    #     st.session_state.vector_store = vector_store
-                    #     st.session_state.qa_chain = {
-                    #         "llm": llm
-                    #     }
-                    #     st.session_state.pdf_processed = True
-
-                        
-                        # Extract and store vocabulary for spell correction
-                        vocabulary = extract_vocabulary_from_text(text)
-                        st.session_state.vocabulary = vocabulary
-
-                        # Clean up temp file
-                        os.unlink(tmp_path)
-
-                        st.info(f"📊 Pages: {total_pages} | Chunks: {len(chunks)} | Vocabulary: {len(vocabulary)} words")
-                        st.session_state.messages = []  # Clear previous chat
-
-                except Exception as e:
-                    st.error(f"❌ Error processing PDF: {str(e)}")
-                    st.session_state.pdf_processed = False
-
-        # Display PDF processing status
-        if st.session_state.pdf_processed:
-            st.success("✅ PDF is ready for questions!")
-        else:
-            st.info("👆 Click 'Process PDF' after uploading to enable Q&A")
-
-    # When the PDF has been processed, tint the primary button (Process PDF) green
-    if st.session_state.pdf_processed:
-        st.markdown(
-            """
-            <style>
-            .stButton > button[kind="primary"] {
-                background-color: #16a34a !important;  /* green */
-                border-color: #16a34a !important;
-                color: #ffffff !important;
-            }
-            
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("</div>", unsafe_allow_html=True)
+# Single column layout for chat
+col_chat = st.container()
 
 with col_chat:
+    # st.subheader("💬 Chat with the AI")
     # SECTION 2: Ask Questions (right side)
     st.subheader("💬 Ask Questions")
     st.markdown("<div class='ask-section-scroll'>", unsafe_allow_html=True)
 
-    if st.session_state.pdf_processed:
-        if st.session_state.qa_chain is None:
-            st.warning("PDF was processed, but the language model is not ready yet. Please reprocess the PDF or restart the app.")
-            st.stop()
-        # Clear chat button
-        if st.button("🗑️ Clear Chat History"):
-            st.session_state.messages = []
+    # Clear chat button
+    if st.button("🗑️ Clear Chat History"):
+        st.session_state.messages = []
+        st.rerun()
+
+    # Display chat history (all past messages)
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if "sources" in message and message["sources"]:
+                with st.expander("📌 Source Documents"):
+                    answer_text = message["content"]
+                    combined_html_parts = []
+                    for source in message["sources"]:
+                        highlighted_html = highlight_relevant_sentence(source, answer_text)
+                        combined_html_parts.append(highlighted_html)
+                    combined_html = "<br><br>".join(combined_html_parts)
+                    st.markdown(
+                        f"<div class='source-panel'>{combined_html}</div>",
+                        unsafe_allow_html=True,
+                    )
+    query = st.chat_input("Ask a question:")
+
+    if query:
+        st.session_state.user_question = query
+        st.session_state.messages.append({"role": "user", "content": query})
+
+        cleaned = query.strip()
+        alnum_only = "".join(ch for ch in cleaned if ch.isalnum())
+        if len(alnum_only) < 3 or len(cleaned.split()) < 1:
+            warning_msg = "Please enter a more specific question."
+            st.session_state.messages.append({"role": "assistant", "content": warning_msg})
             st.rerun()
 
-        # Display chat history (all past messages)
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-                if "sources" in message and message["sources"]:
-                    # Show only the relevant PDF chunks used to answer the question,
-                    # with the most relevant sentence highlighted in light green.
-                    with st.expander("📌 Source Documents"):
-                        answer_text = message["content"]
-                        combined_html_parts = []
-                        for source in message["sources"]:
-                            highlighted_html = highlight_relevant_sentence(source, answer_text)
-                            combined_html_parts.append(highlighted_html)
-                        combined_html = "<br><br>".join(combined_html_parts)
-                        st.markdown(
-                            f"<div class='source-panel'>{combined_html}</div>",
-                            unsafe_allow_html=True,
-                        )
-        query = st.chat_input("Ask a question about the PDF:")
-
-        if query:
-            # Save query in session_state so input doesn't disappear
-            st.session_state.user_question = query
-            st.session_state.messages.append({"role": "user", "content": query})
-
-            # Validate query
-            cleaned = query.strip()
-            alnum_only = "".join(ch for ch in cleaned if ch.isalnum())
-            if len(alnum_only) < 3 or len(cleaned.split()) < 1:
-                warning_msg = "Please enter a more specific question based on the PDF content."
-                st.session_state.messages.append({"role": "assistant", "content": warning_msg})
+        # Retrieval + Answer (skip if no retriever/LLM)
+        try:
+            qa_data = st.session_state.qa_chain if "qa_chain" in st.session_state else None
+            if not qa_data:
+                st.session_state.messages.append({"role": "assistant", "content": "No knowledge base is available for answering questions."})
                 st.rerun()
+            retriever = qa_data["retriever"]
+            llm = qa_data["llm"]
+            
+            expanded_query = expand_with_context(query, st.session_state.messages)
+            search_query = expanded_query if expanded_query != query else query
 
-            # Retrieval + Answer
-            try:
-                qa_data = st.session_state.qa_chain
-                retriever = qa_data["retriever"]
-                llm = qa_data["llm"]
+            # if is_followup_question(query):
+            #     last_topic = ""
+            #     for msg in reversed(st.session_state.messages[:-1]):
+            #         if msg["role"] == "user":
+            #             last_topic = msg["content"]
+            #             break
+            #     search_query = last_topic + " " + query if last_topic else query
+            # else:
+            #     search_query = query
 
-                # Expand with context
-                expanded_query = expand_with_context(query, st.session_state.messages)
-                search_query = expanded_query if expanded_query != query else query
 
-                # Get documents
-                if hasattr(retriever, "get_relevant_documents"):
-                    docs = retriever.get_relevant_documents(search_query)
-                elif hasattr(retriever, "invoke"):
-                    docs = retriever.invoke(search_query)
+            
+            if hasattr(retriever, "get_relevant_documents"):
+                docs = retriever.get_relevant_documents(search_query)
+            elif hasattr(retriever, "invoke"):
+                docs = retriever.invoke(search_query)
+            else:
+                docs = []
+
+            # context = "\n\n".join([d.page_content for d in docs]) if docs else ""
+            unique_docs = []
+            seen = set()
+
+            for d in docs:
+                txt = d.page_content.strip()
+                if txt not in seen:
+                    seen.add(txt)
+                    unique_docs.append(d)
+
+            docs = unique_docs
+            context = "\n\n".join([d.page_content for d in docs]) if docs else ""
+
+
+            semantic_score = 0.0
+            if docs and "embeddings_model" in st.session_state:
+                semantic_score = compute_max_chunk_similarity(search_query, docs, st.session_state.embeddings_model)
+
+            SEMANTIC_THRESHOLD = 0.35
+            is_relevant = bool(context.strip()) and semantic_score >= SEMANTIC_THRESHOLD
+
+            if not is_relevant:
+                if not context.strip():
+                    answer = "No relevant content found. Please try rephrasing your question."
                 else:
-                    docs = []
+                    answer = f"The question doesn't seem related to the content (score: {semantic_score:.2f}). Try asking something more specific to the knowledge base."
+                sources_text = []
+            else:
+                question_for_llm = search_query if search_query != query else query
+                # Build conversation history for context
+                chat_history = ""
+                recent_msgs = st.session_state.messages[-6:]  # Last 3 Q&A pairs
+                for msg in recent_msgs:
+                    if msg["role"] == "user":
+                        chat_history += f"User: {msg['content']}\n"
+                    elif msg["role"] == "assistant":
+                        chat_history += f"Assistant: {msg['content']}\n"
 
-                context = "\n\n".join([d.page_content for d in docs]) if docs else ""
-
-                # Semantic check
-                semantic_score = 0.0
-                if docs and st.session_state.embeddings_model:
-                    semantic_score = compute_max_chunk_similarity(search_query, docs, st.session_state.embeddings_model)
-
-                SEMANTIC_THRESHOLD = 0.35
-                is_relevant = bool(context.strip()) and semantic_score >= SEMANTIC_THRESHOLD
-
-                if not is_relevant:
-                    if not context.strip():
-                        answer = "No relevant content found in the PDF. Please try rephrasing your question."
-                    else:
-                        answer = f"The question doesn't seem related to the PDF content (score: {semantic_score:.2f}). Try asking something more specific to the document."
-                    sources_text = []
-                else:
-                    # Use expanded query for better context in follow-up questions
-                    question_for_llm = search_query if search_query != query else query
-                    
-                    # Build conversation history for context
-                    chat_history = ""
-                    recent_msgs = st.session_state.messages[-6:]  # Last 3 Q&A pairs
-                    for msg in recent_msgs:
-                        if msg["role"] == "user":
-                            chat_history += f"User: {msg['content']}\n"
-                        elif msg["role"] == "assistant":
-                            chat_history += f"Assistant: {msg['content']}\n"
-
-
-
-                    # System prompt for consistent behavior
-                    system_prompt = """You are a precise document assistant. Your rules:
+                # System prompt for consistent behavior
+                system_prompt = """You are a precise document assistant. Your rules:
 1. Answer ONLY using information from the provided context
-2. If asked "what are they" or similar, list ALL items mentioned for that topic
-3. Be specific and complete - list all relevant details
-4. If information is not in context, say "I don't have that information"
-5. Never make up facts or use external knowledge"""
+2. Be specific and complete - list all relevant details
+3. If information is not in context, say "I don't have that information"
+4. Never make up facts or use external knowledge
+5. Do not repeat any Sentence in the context verbatim in your answer.
 
-                    prompt = f"""{system_prompt}
+"""
+
+                prompt = f"""{system_prompt}
 
 {f"Previous conversation:{chr(10)}{chat_history}" if chat_history else ""}
 
@@ -814,55 +668,52 @@ Current question: {question_for_llm}
 
 Answer:"""
 
-                    llm_output = llm(
-                        prompt,
-                        max_new_tokens=300,
-                        do_sample=False,
-                    )
-                    raw_answer = llm_output[0]["generated_text"].strip() if llm_output else ""
-                    
-                    # Step 3: Post-generation validation - check answer is grounded
-                    is_grounded, grounding_score = validate_answer_grounding(
-                        raw_answer, context, st.session_state.embeddings_model
-                    )
-                    
-                    # Debug grounding in sidebar
-                    with st.sidebar:
-                        st.write(f"📎 Grounding Score: {grounding_score:.3f}")
-                        st.write(f"✅ Grounded: {is_grounded}")
-                    
-                    if not raw_answer or not is_grounded:
-                        answer = "I couldn't find a reliable answer in the PDF for this question."
-                    else:
-                        answer = raw_answer
-                    
-                    sources_text = [doc.page_content for doc in docs] if docs else []
+                llm_output = llm(
+                    prompt,
+                    max_new_tokens=300,
+                    do_sample=False,
+                )
+                raw_answer = llm_output[0]["generated_text"].strip() if llm_output else ""
+                
+                # Step 3: Post-generation validation - check answer is grounded
+                is_grounded, grounding_score = validate_answer_grounding(
+                    raw_answer, context, st.session_state.embeddings_model
+                )
+                
+                # Debug grounding in sidebar
+                with st.sidebar:
+                    st.write(f"📎 Grounding Score: {grounding_score:.3f}")
+                    st.write(f"✅ Grounded: {is_grounded}")
+                
+                if not raw_answer or not is_grounded:
+                    answer = "I couldn't find a reliable answer in the PDF for this question."
+                else:
+                    answer = raw_answer
+                
+                sources_text = [doc.page_content for doc in docs] if docs else []
 
-                # Update chat history (user question + assistant answer)
-                st.session_state.messages.append({"role": "user", "content": query})
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer,
-                    "sources": sources_text,
-                })
+            # Update chat history (user question + assistant answer)
+            # st.session_state.messages.append({"role": "user", "content": query})
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "sources": sources_text,
+            })
 
-            except Exception as e:
-                error_msg = "❌ An error occurred while processing your question. Please try again."
-                st.session_state.messages.append({
-                    "role": "user",
-                    "content": query,
-                })
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": error_msg,
-                })
+        except Exception as e:
+            error_msg = "❌ An error occurred while processing your question. Please try again."
+            # st.session_state.messages.append({
+            #     "role": "user",
+            #     "content": query,
+            # })
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": error_msg,
+            })
 
-            # Rerun so that the updated history is rendered above and the input
-            # bar remains visually fixed at the bottom, similar to ChatGPT.
-            st.rerun()
-    else:
-        st.info("📤 Please upload and process a PDF first to start asking questions.")
-
+        # Rerun so that the updated history is rendered above and the input
+        # bar remains visually fixed at the bottom, similar to ChatGPT.
+        st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
 # Fixed footer text rendered near the bottom of the page, visually under the
@@ -870,7 +721,7 @@ Answer:"""
 st.markdown(
     """
     <div class='chat-footer-note'>
-      Built with ❤️ using Streamlit, LangChain, FAISS, and HuggingFace
+      Built with ❤️ using Streamlit, LangChain, CromaDB, and HuggingFace
     </div>
     """,
     unsafe_allow_html=True,
