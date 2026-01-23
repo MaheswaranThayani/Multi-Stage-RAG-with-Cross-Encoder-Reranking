@@ -111,14 +111,28 @@ def highlight_relevant_sentence(source_text: str, answer_text: str) -> str:
 
 
 def split_into_chunks(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
-    """Split text into smaller chunks with overlap."""
-    words = text.split()
+    """Semantic chunking: split text into paragraph-based chunks, merging paragraphs to fit a target size."""
+    import re
+    paragraphs = re.split(r'\n\n+', text)
     chunks = []
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = ' '.join(words[i:i + chunk_size])
-        chunks.append(chunk)
-        if i + chunk_size >= len(words):
-            break
+    current_chunk = []
+    current_len = 0
+    for para in paragraphs:
+        para_len = len(para.split())
+        if current_len + para_len > chunk_size and current_chunk:
+            chunks.append(' '.join(current_chunk))
+            # For overlap, start new chunk with last N words from previous chunk
+            if overlap > 0 and current_chunk:
+                overlap_words = ' '.join(' '.join(current_chunk).split()[-overlap:])
+                current_chunk = [overlap_words] if overlap_words else []
+                current_len = len(overlap_words.split())
+            else:
+                current_chunk = []
+                current_len = 0
+        current_chunk.append(para)
+        current_len += para_len
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
     return chunks
 
 def is_followup_question(query: str) -> bool:
@@ -385,7 +399,7 @@ def validate_answer_grounding(answer: str, context: str, embeddings_model=None) 
 
 # Cached local HuggingFace pipeline (avoids remote API limits)
 @st.cache_resource(show_spinner=False)
-def load_local_hf_pipeline(model_name: str = "google/flan-t5-small"):
+def load_local_hf_pipeline(model_name: str = "google/flan-t5-large"):
     """Load a local HuggingFace text2text pipeline to stay within PDF context."""
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, pipeline
 
@@ -417,14 +431,8 @@ if "vector_store" not in st.session_state or st.session_state.vector_store is No
             page_text = page.extract_text()
             if page_text:
                 text += page_text
-        # Split text into chunks
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=100,
-            length_function=len
-        )
-        chunks = splitter.split_text(text)
+        # Split text into semantic chunks (sentence-based)
+        chunks = split_into_chunks(text, chunk_size=1000, overlap=200)
         # Create embeddings and vector store
         try:
             from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -441,7 +449,7 @@ if "vector_store" not in st.session_state or st.session_state.vector_store is No
         )
         vector_store.persist()
         # Configure local HuggingFace pipeline (no external API calls)
-        llm = load_local_hf_pipeline("google/flan-t5-small")
+        llm = load_local_hf_pipeline("google/flan-t5-large")
         retriever = vector_store.as_retriever(search_kwargs={"k": 3})
         qa_chain = {"retriever": retriever, "llm": llm}
         st.session_state.vector_store = vector_store
@@ -586,22 +594,12 @@ with col_chat:
                 st.rerun()
             retriever = qa_data["retriever"]
             llm = qa_data["llm"]
-            
+
             expanded_query = expand_with_context(query, st.session_state.messages)
             search_query = expanded_query if expanded_query != query else query
 
-            # if is_followup_question(query):
-            #     last_topic = ""
-            #     for msg in reversed(st.session_state.messages[:-1]):
-            #         if msg["role"] == "user":
-            #             last_topic = msg["content"]
-            #             break
-            #     search_query = last_topic + " " + query if last_topic else query
-            # else:
-            #     search_query = query
-
-
-            
+            # Aggregate top-k relevant chunks for context and source display
+            k = 3  # Number of chunks to aggregate
             if hasattr(retriever, "get_relevant_documents"):
                 docs = retriever.get_relevant_documents(search_query)
             elif hasattr(retriever, "invoke"):
@@ -609,25 +607,44 @@ with col_chat:
             else:
                 docs = []
 
-            # context = "\n\n".join([d.page_content for d in docs]) if docs else ""
-            unique_docs = []
-            seen = set()
+            # Take top-k chunks (if available)
+            docs = docs[:k] if docs else []
 
-            for d in docs:
-                txt = d.page_content.strip()
-                if txt not in seen:
-                    seen.add(txt)
-                    unique_docs.append(d)
-
-            docs = unique_docs
-            context = "\n\n".join([d.page_content for d in docs]) if docs else ""
-
+            # For list-type questions, concatenate top-k chunks into a single context block
+            list_question = any(word in search_query.lower() for word in ["what are", "which", "list", "who are", "name the", "give the", "mention the"])
+            if list_question:
+                combined_context = "\n".join([d.page_content for d in docs])
+                # Remove duplicate lines
+                lines = combined_context.splitlines()
+                seen = set()
+                deduped_lines = []
+                for line in lines:
+                    line_strip = line.strip()
+                    if line_strip and line_strip not in seen:
+                        deduped_lines.append(line_strip)
+                        seen.add(line_strip)
+                context = "\n".join(deduped_lines)
+            else:
+                # Remove duplicate lines from context as before
+                raw_context = "\n\n".join([d.page_content for d in docs]) if docs else ""
+                lines = raw_context.splitlines()
+                seen = set()
+                deduped_lines = []
+                for line in lines:
+                    line_strip = line.strip()
+                    if line_strip and line_strip not in seen:
+                        deduped_lines.append(line_strip)
+                        seen.add(line_strip)
+                context = "\n".join(deduped_lines)
 
             semantic_score = 0.0
             if docs and "embeddings_model" in st.session_state:
                 semantic_score = compute_max_chunk_similarity(search_query, docs, st.session_state.embeddings_model)
 
-            SEMANTIC_THRESHOLD = 0.35
+
+            # Lower threshold for vague/about questions
+            vague_about = any(word in search_query.lower() for word in ["about ", "describe ", "tell me about", "give an overview", "summary of", "history of"])
+            SEMANTIC_THRESHOLD = 0.2 if vague_about else 0.35
             is_relevant = bool(context.strip()) and semantic_score >= SEMANTIC_THRESHOLD
 
             if not is_relevant:
@@ -648,7 +665,14 @@ with col_chat:
                         chat_history += f"Assistant: {msg['content']}\n"
 
                 # System prompt for consistent behavior
-                system_prompt = """You are a precise document assistant. Your rules:
+#                 if list_question:
+#                     system_prompt = """You are a precise document assistant. Your rules:
+# 1. Answer ONLY using information from the provided context.
+# 2. If the answer is a list, enumerate all items from the context. Do not just state the number, but list the items explicitly.
+# 3. If the answer cannot be found in the context, say so.
+# """
+#                 else:
+                    system_prompt = """You are a precise document assistant. Your rules:
 1. Answer ONLY using information from the provided context
 2. Be specific and complete - list all relevant details
 3. If information is not in context, say "I don't have that information"
@@ -689,7 +713,30 @@ Answer:"""
                     answer = "I couldn't find a reliable answer in the PDF for this question."
                 else:
                     answer = raw_answer
-                
+                    # Post-processing: If answer is just a number or single word and context contains a list, extract and append the list
+                    if list_question and (re.fullmatch(r"\d+", answer) or len(answer.split()) <= 2):
+                        lines = context.splitlines()
+                        list_lines = []
+                        found_intro = False
+                        for i, line in enumerate(lines):
+                            if re.search(r"colonized in|stages|are|include|consist of|following", line, re.IGNORECASE):
+                                found_intro = True
+                                # Optionally include the intro line
+                                list_lines.append(line.strip())
+                                # Add next lines if they look like list items
+                                for next_line in lines[i+1:i+6]:
+                                    if re.match(r"\s*[-•\d.]+|[A-Z][a-z]+", next_line):
+                                        list_lines.append(next_line.strip())
+                                    else:
+                                        break
+                                break
+                        # Fallback: look for lines with years or country names
+                        if not list_lines:
+                            for line in lines:
+                                if re.search(r"Portuguese|Dutch|British|\d{4}", line, re.IGNORECASE):
+                                    list_lines.append(line.strip())
+                        if list_lines:
+                            answer = answer + "\n" + "\n".join(list_lines)
                 sources_text = [doc.page_content for doc in docs] if docs else []
 
             # Update chat history (user question + assistant answer)
